@@ -1,26 +1,52 @@
-# === FEATURE IMPORTANCE ДЛЯ ВСЕХ ФИЧ ===
+# Обучение CatBoost только на топ-20 признаках по feature importance
+# Предполагается, что уже есть: df_final (с индексом vat_num, year), обученная model (базовая) ИЛИ feat_importances,
+# и что целевая колонка называется 'target'.
 
-import pandas as pd
-import matplotlib.pyplot as plt
+from catboost import CatBoostClassifier, Pool
+from sklearn.metrics import roc_auc_score
+import numpy as np
 
-# получаем importance из CatBoost
-fi_df = model.get_feature_importance(prettified=True)
+# --- 1) Получаем топ-20 фич по importance из уже обученной модели ---
+fi_df = model.get_feature_importance(prettified=True).rename(
+    columns={"Feature Id": "feature", "Importances": "importance"}
+).sort_values("importance", ascending=False)
 
-# приводим к удобным названиям
-fi_df = fi_df.rename(columns={
-    "Feature Id": "feature",
-    "Importances": "importance"
-})
+top20_features = fi_df["feature"].head(20).tolist()
+print("Top-20 features:", top20_features)
 
-# сортируем
-fi_df = fi_df.sort_values("importance", ascending=False).reset_index(drop=True)
+# --- 2) Готовим X/y только по этим фичам ---
+X = df_final[top20_features]
+y = df_final["target"].astype(int)
 
-print("\nTop 30 features by importance:")
-print(fi_df.head(30))
+years = df_final.index.get_level_values("year")
+train_year_max = 2021
+val_year = 2022
+test_year = 2023
 
-# --- график топ-20 ---
-plt.figure(figsize=(10,6))
-plt.barh(fi_df["feature"].head(20)[::-1], fi_df["importance"].head(20)[::-1])
-plt.title("Top 20 Feature Importance")
-plt.xlabel("Importance")
-plt.show()
+X_train, y_train = X[years <= train_year_max], y[years <= train_year_max]
+X_val, y_val     = X[years == val_year],      y[years == val_year]
+X_test, y_test   = X[years >= test_year],     y[years >= test_year]
+
+cat_features = list(X_train.select_dtypes(include=["object"]).columns)
+
+train_pool = Pool(X_train, y_train, cat_features=cat_features)
+val_pool   = Pool(X_val,   y_val,   cat_features=cat_features)
+test_pool  = Pool(X_test,  y_test,  cat_features=cat_features)
+
+# --- 3) Обучаем модель заново на топ-20 ---
+model_top20 = CatBoostClassifier(
+    iterations=3000,
+    learning_rate=0.03,
+    eval_metric="AUC",
+    random_seed=42,
+    verbose=200,
+    early_stopping_rounds=200,
+    auto_class_weights="Balanced",
+    allow_writing_files=False
+)
+
+model_top20.fit(train_pool, eval_set=val_pool, use_best_model=True)
+
+# --- 4) Быстрая оценка AUC на test ---
+p_test = model_top20.predict_proba(X_test)[:, 1]
+print("AUC test (top-20 features):", roc_auc_score(y_test, p_test))
