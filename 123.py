@@ -1,52 +1,79 @@
-# Обучение CatBoost только на топ-20 признаках по feature importance
-# Предполагается, что уже есть: df_final (с индексом vat_num, year), обученная model (базовая) ИЛИ feat_importances,
-# и что целевая колонка называется 'target'.
-
-from catboost import CatBoostClassifier, Pool
-from sklearn.metrics import roc_auc_score
 import numpy as np
+import pandas as pd
 
-# --- 1) Получаем топ-20 фич по importance из уже обученной модели ---
-fi_df = model.get_feature_importance(prettified=True).rename(
-    columns={"Feature Id": "feature", "Importances": "importance"}
-).sort_values("importance", ascending=False)
+from autogluon.tabular import TabularPredictor
+from sklearn.metrics import roc_auc_score, brier_score_loss, log_loss
+from sklearn.isotonic import IsotonicRegression
 
-top20_features = fi_df["feature"].head(20).tolist()
-print("Top-20 features:", top20_features)
 
-# --- 2) Готовим X/y только по этим фичам ---
-X = df_final[top20_features]
-y = df_final["target"].astype(int)
+# ============================================================
+# 0) Подготовка данных (как у тебя)
+# ============================================================
 
-years = df_final.index.get_level_values("year")
+df_ag = df_final.reset_index()  # vat_num, year как колонки
+
+X = df_ag.drop(columns=['target', 'fin_cond_index', 'cred_limit'], errors='ignore')
+y = df_ag['target'].astype(int)
+years = df_ag['year']
+
 train_year_max = 2021
 val_year = 2022
 test_year = 2023
 
-X_train, y_train = X[years <= train_year_max], y[years <= train_year_max]
-X_val, y_val     = X[years == val_year],      y[years == val_year]
-X_test, y_test   = X[years >= test_year],     y[years >= test_year]
+# year/vat_num только для сплита, в фичи не даём
+X_model = X.drop(columns=['vat_num', 'year'], errors='ignore')
 
-cat_features = list(X_train.select_dtypes(include=["object"]).columns)
+X_train, y_train = X_model[years <= train_year_max], y[years <= train_year_max]
+X_val,   y_val   = X_model[years == val_year],      y[years == val_year]
+X_test,  y_test  = X_model[years >= test_year],     y[years >= test_year]
 
-train_pool = Pool(X_train, y_train, cat_features=cat_features)
-val_pool   = Pool(X_val,   y_val,   cat_features=cat_features)
-test_pool  = Pool(X_test,  y_test,  cat_features=cat_features)
+train_data = X_train.copy()
+train_data['target'] = y_train.values
 
-# --- 3) Обучаем модель заново на топ-20 ---
-model_top20 = CatBoostClassifier(
-    iterations=3000,
-    learning_rate=0.03,
-    eval_metric="AUC",
-    random_seed=42,
-    verbose=200,
-    early_stopping_rounds=200,
-    auto_class_weights="Balanced",
-    allow_writing_files=False
+val_data = X_val.copy()
+val_data['target'] = y_val.values
+
+
+# ============================================================
+# 1) Обучение AutoGluon (аналог model.fit(train, eval_set=val))
+# ============================================================
+
+predictor = TabularPredictor(
+    label='target',
+    problem_type='binary',
+    eval_metric='roc_auc',
+    verbosity=2,
+).fit(
+    train_data=train_data,
+    tuning_data=val_data,
+    presets='medium_quality',   # можно 'best_quality'
 )
 
-model_top20.fit(train_pool, eval_set=val_pool, use_best_model=True)
 
-# --- 4) Быстрая оценка AUC на test ---
-p_test = model_top20.predict_proba(X_test)[:, 1]
-print("AUC test (top-20 features):", roc_auc_score(y_test, p_test))
+# ============================================================
+# 2) Оценка ДО калибровки (как у тебя)
+# ============================================================
+
+p_val = predictor.predict_proba(X_val)[1].values
+p_test = predictor.predict_proba(X_test)[1].values
+
+print("Before calibration:")
+print(" AUC test:   ", roc_auc_score(y_test, p_test))
+print(" Brier test: ", brier_score_loss(y_test, p_test))
+print(" LogLoss test:", log_loss(y_test, p_test))
+
+
+# ============================================================
+# 3) Калибровка isotonic "втупую" по предсказанным вероятностям
+#    (то же самое, что делает isotonic-калибратор, но без CalibratedClassifierCV)
+# ============================================================
+
+iso = IsotonicRegression(out_of_bounds='clip')
+iso.fit(p_val, y_val.values)
+
+p_test_cal = iso.transform(p_test)
+
+print("\nAfter calibration (isotonic on val probs):")
+print(" AUC test:   ", roc_auc_score(y_test, p_test_cal))
+print(" Brier test: ", brier_score_loss(y_test, p_test_cal))
+print(" LogLoss test:", log_loss(y_test, p_test_cal))
