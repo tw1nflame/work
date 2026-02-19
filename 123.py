@@ -1,12 +1,13 @@
-default_year = df.loc[df['dflt_year']==1].groupby('vat_num')['year'].min()
+- docker build
+    --build-arg NEXT_PUBLIC_API_BASE_URL=$NEXT_PUBLIC_API_BASE_URL
+    --build-arg NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL
+    --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY=$NEXT_PUBLIC_SUPABASE_ANON_KEY
 
-last_report = (
-    df[df['dflt_year']==0]
-    .groupby('vat_num')['year']
-    .max()
-)
 
-lag = (default_year - last_report).dropna()
+ARG NEXT_PUBLIC_API_BASE_URL
+ARG NEXT_PUBLIC_SUPABASE_URL
+ARG NEXT_PUBLIC_SUPABASE_ANON_KEY
 
-print(lag.value_counts().sort_index())
-print(lag.describe())
+ENV NEXT_PUBLIC_API_BASE_URL=$NEXT_PUBLIC_API_BASE_URL
+ENV NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL
+ENV NEXT_PUBLIC_SUPABASE_ANON_KEY=$NEXT_PUBLIC_SUPABASE_ANON_KEY
