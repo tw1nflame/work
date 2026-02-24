@@ -1,49 +1,73 @@
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
-from scipy.special import expit
+from scipy.special import expit  # sigmoid
 from catboost import Pool
 
-# any test object
+# возьмем любой объект из test (первый)
 i = 0
-x1 = X_test.iloc[[i]]
+x1 = X_test.iloc[[i]]  # DataFrame 1xN
 
-# SHAP from CatBoost: (n_features + 1), last column is base (raw/logit)
-shap = model.get_feature_importance(Pool(x1, cat_features=cat_features), type="ShapValues")[0]
-phi, base = shap[:-1], shap[-1]
+# SHAP для CatBoost (log-odds / raw)
+# CatBoost возвращает (n_objects, n_features + 1), последний столбец = expected_value (base, raw)
+shap_vals = model.get_feature_importance(
+    Pool(x1, cat_features=cat_features),
+    type="ShapValues"
+)
+phi = shap_vals[0, :-1]   # SHAP по фичам (raw)
+base = shap_vals[0, -1]   # base value (raw)
 
-# order by |SHAP| (in raw space)
-names = x1.columns.to_numpy()
+feat_names = x1.columns.to_list()
+
+# --- порядок фичей в waterfall: по убыванию |SHAP| ---
 order = np.argsort(-np.abs(phi))
+phi_ord = phi[order]
+names_ord = [feat_names[j] for j in order]
 
 top_k = 20
-idx = order[:top_k]
-phi_k = phi[idx]
-names_k = names[idx]
+phi_k = phi_ord[:top_k]
+names_k = names_ord[:top_k]
 
-# PD path and per-feature ΔPD (same order)
-raw_steps = np.r_[base, base + np.cumsum(phi_k)]
-pd_steps = expit(raw_steps)
-d_pd = np.diff(pd_steps)
+# --- проверка: итоговая вероятность из raw ---
+raw_final = base + phi.sum()
+pd_from_shap = float(expit(raw_final))
+pd_model = float(model.predict_proba(x1)[:, 1])
 
-start_pd, end_pd = pd_steps[0], pd_steps[-1]
-print("PD model:", float(model.predict_proba(x1)[:, 1]))
-print("PD from SHAP path (top_k only):", float(end_pd))
+print("PD model:", pd_model)
+print("PD from SHAP (raw -> sigmoid):", pd_from_shap)
 
-# waterfall geometry
-left = pd_steps[:-1]
-y = np.arange(len(names_k))[::-1]
+# --- waterfall в RAW (log-odds) со знаками (+ красный, - синий) ---
+# Начальные точки (left) для каждого бара: base + сумма предыдущих вкладов
+raw_left = base + np.r_[0.0, np.cumsum(phi_k[:-1])]
+raw_width = phi_k
 
-colors = np.where(d_pd >= 0, "red", "blue")
-plt.figure(figsize=(10, 6))
-plt.barh(y, np.abs(d_pd)[::-1], left=np.minimum(left, left + d_pd)[::-1], color=colors[::-1])
+# Цвета по знаку SHAP
+colors = np.where(raw_width >= 0, "crimson", "steelblue")
+
+# Для красивого водопада: бар рисуем от min(left, left+width), ширина = abs(width)
+raw_start = np.minimum(raw_left, raw_left + raw_width)
+raw_w = np.abs(raw_width)
+
+# Для отображения сверху вниз (как в классических waterfall)
+y = np.arange(top_k)[::-1]
+
+plt.figure(figsize=(11, 7))
+plt.barh(y, raw_w[::-1], left=raw_start[::-1], color=colors[::-1])
 plt.yticks(y, names_k[::-1])
-plt.xlabel("Δ PD")
-plt.title(f"Waterfall in PD space (top {top_k})\nstart PD={start_pd:.4f} → end PD={end_pd:.4f}")
-plt.axvline(0, linewidth=1)
+plt.xlabel("Δ raw (log-odds)")
+plt.axvline(base, linestyle="--", linewidth=1)  # base line
+plt.axvline(raw_final, linestyle=":", linewidth=1)  # final raw line
+
+plt.title(
+    f"Waterfall (RAW / log-odds, top {top_k})\n"
+    f"base PD={expit(base):.4f} → final PD={expit(raw_final):.4f}"
+)
 plt.tight_layout()
 plt.show()
 
-# remaining features collapsed
-phi_rest = phi[order[top_k:]]
-other = expit(base + phi_k.sum() + phi_rest.sum()) - expit(base + phi_k.sum())
-print(f"Other features total ΔPD: {other:+.6f}")
+# --- 'прочие' фичи одним блоком (raw и в PD) ---
+other_raw = phi_ord[top_k:].sum()
+other_pd = expit(raw_final) - expit(base + phi_k.sum())  # вклад остальных в PD (нелинеен, просто справочно)
+
+print(f"Other features total Δraw: {other_raw:+.6f}")
+print(f"Other features net ΔPD (reference): {other_pd:+.6f}")
