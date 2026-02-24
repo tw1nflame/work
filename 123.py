@@ -1,41 +1,29 @@
-# === 8) ZERO / "0" COUNTS BY ROW (OLD vs NEW) ===
-print("\n=== 8) ZERO / '0' COUNTS BY ROW ===")
+import pandas as pd
 
-# Берем общее пространство фичей (как в вашем сравнении)
-feat_cols = [c for c in common_feature_cols if c in df_old.columns and c in df_new.columns]
+# 1) Берем 2024 (year может быть в индексе или в колонке)
+if 'year' in df_final.columns:
+    df_2024 = df_final[df_final['year'] == 2024].copy()
+else:
+    df_2024 = df_final[df_final.index.get_level_values('year') == 2024].copy()
 
-# OLD
-old_zero_mask = df_old[feat_cols].isin([0, '0'])
-old_zero_cnt = old_zero_mask.sum(axis=1)
+# 2) Исключаем служебные колонки (если вдруг есть)
+service_cols = {'target', 'dflt_year', 'year', 'vat_num'}
+fin_cols = [c for c in df_2024.columns if c not in service_cols]
 
-print("\nOLD:")
-print("rows:", len(df_old))
-print("feature cols checked:", len(feat_cols))
-print("all-zero rows:", int((old_zero_cnt == len(feat_cols)).sum()), f"({(old_zero_cnt == len(feat_cols)).mean():.2%})")
-print("zero-count per row (describe):")
-print(old_zero_cnt.describe())
-print("\nOLD zero-count distribution (tail 15):")
-print(old_zero_cnt.value_counts().sort_index().tail(15))
+# 3) Считаем нули (0 и '0') по колонкам
+zero_mask = df_2024[fin_cols].isin([0, '0'])
 
-# NEW
-new_zero_mask = df_new[feat_cols].isin([0, '0'])
-new_zero_cnt = new_zero_mask.sum(axis=1)
+res_2024_zeros = pd.DataFrame({
+    'zero_count': zero_mask.sum(),
+    'rows_2024': len(df_2024)
+})
+res_2024_zeros['zero_pct'] = (100 * res_2024_zeros['zero_count'] / res_2024_zeros['rows_2024']).round(2)
 
-print("\nNEW:")
-print("rows:", len(df_new))
-print("feature cols checked:", len(feat_cols))
-print("all-zero rows:", int((new_zero_cnt == len(feat_cols)).sum()), f"({(new_zero_cnt == len(feat_cols)).mean():.2%})")
-print("zero-count per row (describe):")
-print(new_zero_cnt.describe())
-print("\nNEW zero-count distribution (tail 15):")
-print(new_zero_cnt.value_counts().sort_index().tail(15))
+# 4) Сортировка: где больше всего нулей
+res_2024_zeros = res_2024_zeros.sort_values(['zero_count', 'zero_pct'], ascending=False)
 
-# Дополнительно: доля нулей по всем ячейкам (по общим фичам)
-old_zero_cells = int(old_zero_mask.to_numpy().sum())
-new_zero_cells = int(new_zero_mask.to_numpy().sum())
-old_total_cells = len(df_old) * len(feat_cols)
-new_total_cells = len(df_new) * len(feat_cols)
+print(f"Rows in 2024: {len(df_2024)}")
+print(res_2024_zeros)
 
-print("\nZero-cell share in common feature space:")
-print(f"OLD: {old_zero_cells}/{old_total_cells} = {old_zero_cells/old_total_cells:.2%}")
-print(f"NEW: {new_zero_cells}/{new_total_cells} = {new_zero_cells/new_total_cells:.2%}")
+# (опционально) только колонки, где есть хотя бы один ноль
+# print(res_2024_zeros[res_2024_zeros['zero_count'] > 0])
