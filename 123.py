@@ -1,12 +1,9 @@
-# year уже есть и в индексе, и в колонке -> берем явно уровень индекса
-y = final_df.index.get_level_values('year')
-t = final_df['target']
+y_year = df_final.index.get_level_values('year').to_numpy()
+t = df_final['target'].to_numpy()
 
-res = (
-    pd.DataFrame({'year': y, 'target': t})
-    .groupby('year')['target']
-    .agg(total='size', ones='sum')
-)
+res = (pd.DataFrame({'year': y_year, 'target': t})
+       .groupby('year', as_index=True)['target']
+       .agg(total='size', ones='sum'))
 
 res['zeros'] = res['total'] - res['ones']
 res['target_1_pct'] = (100 * res['ones'] / res['total']).round(2)
