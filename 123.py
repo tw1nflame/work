@@ -1,29 +1,65 @@
-# X_now: текущие фичи
-X_now = df_final.drop(columns=['target'], errors='ignore')
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.special import expit  # sigmoid
 
-# lag-1
-X_lag1 = X_now.groupby(level=0).shift(1)
-X_lag1.columns = [f"{c}_lag1" for c in X_lag1.columns]
+# возьмем любой объект из test (первый)
+i = 0
+x1 = X_test.iloc[[i]]  # DataFrame 1xN
 
-# lag-2
-X_lag2 = X_now.groupby(level=0).shift(2)
-X_lag2.columns = [f"{c}_lag2" for c in X_lag2.columns]
+# SHAP для CatBoost:
+# shap_vals: shape (1, n_features) для бинарной классификации
+# expected_value: base value (в raw/логит шкале)
+shap_vals = model.get_feature_importance(Pool(x1, cat_features=cat_features), type="ShapValues")
+# CatBoost возвращает (n_objects, n_features + 1), последний столбец = expected_value (base)
+phi = shap_vals[0, :-1]
+base = shap_vals[0, -1]
 
-# итоговый датасет: текущие + lag1 + lag2 + target
-df_lag = pd.concat([X_now, X_lag1, X_lag2, df_final['target']], axis=1)
+# --- порядок фичей в waterfall: по убыванию |SHAP| ---
+feat_names = x1.columns.to_list()
+order = np.argsort(-np.abs(phi))
+phi_ord = phi[order]
+names_ord = [feat_names[j] for j in order]
 
-# строки, где lag1 и lag2 реально доступны (не все NaN по соответствующим группам колонок)
-lag1_cols = X_lag1.columns
-lag2_cols = X_lag2.columns
+# --- строим "пошаговую" PD траекторию ---
+raw_steps = np.r_[base, base + np.cumsum(phi_ord)]
+pd_steps = expit(raw_steps)                     # PD после каждого шага
+pd_delta = np.diff(pd_steps)                    # вклад фичи уже в PD-шкале
 
-has_lag1_row = ~df_lag[lag1_cols].isna().all(axis=1)
-has_lag2_row = ~df_lag[lag2_cols].isna().all(axis=1)
+# --- итоговая проверка (должно совпасть с predict_proba) ---
+pd_model = float(model.predict_proba(x1)[:, 1])
+pd_from_shap = float(pd_steps[-1])
+print("PD model:", pd_model)
+print("PD from SHAP path:", pd_from_shap)
 
-# если хочешь учить только на строках, где есть и lag1, и lag2:
-df_lag_ready = df_lag[has_lag1_row & has_lag2_row].copy()
+# --- рисуем waterfall в PD ---
+top_k = 20  # если фичей много, покажем топ-20
+pd_delta_k = pd_delta[:top_k]
+names_k = names_ord[:top_k]
 
-print("Rows total:", len(df_lag))
-print("Rows with lag1:", int(has_lag1_row.sum()), f"({has_lag1_row.mean():.2%})")
-print("Rows with lag2:", int(has_lag2_row.sum()), f"({has_lag2_row.mean():.2%})")
-print("Rows with lag1 & lag2:", len(df_lag_ready), f"({(has_lag1_row & has_lag2_row).mean():.2%})")
-print("df_lag_ready shape:", df_lag_ready.shape)
+start_pd = pd_steps[0]
+end_pd = pd_steps[-1]
+
+# позиции для накопления
+cum = start_pd
+lefts = []
+widths = []
+for d in pd_delta_k:
+    lefts.append(min(cum, cum + d))
+    widths.append(abs(d))
+    cum += d
+
+y = np.arange(len(names_k))[::-1]
+
+plt.figure(figsize=(10, 6))
+plt.barh(y, widths[::-1], left=np.array(lefts)[::-1])
+plt.yticks(y, names_k[::-1])
+plt.xlabel("Δ PD")
+plt.title(f"Waterfall in PD space (top {top_k} features)\nstart PD={start_pd:.4f} → end PD={end_pd:.4f}")
+plt.axvline(0, linewidth=1)
+plt.tight_layout()
+plt.show()
+
+# если хочешь вывести еще "прочие" (все кроме top_k) одним блоком:
+other = pd_delta[top_k:].sum()
+print(f"Other features total ΔPD: {other:+.6f}")
