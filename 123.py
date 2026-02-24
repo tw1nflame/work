@@ -1,73 +1,80 @@
 import numpy as np
 import pandas as pd
+import shap
 import matplotlib.pyplot as plt
 from scipy.special import expit  # sigmoid
 from catboost import Pool
 
-# возьмем любой объект из test (первый)
+# =========================
+# 0) Выбери объект из test
+# =========================
 i = 0
-x1 = X_test.iloc[[i]]  # DataFrame 1xN
+x1 = X_test.iloc[[i]]  # DataFrame 1xN (одна строка)
 
-# SHAP для CatBoost (log-odds / raw)
-# CatBoost возвращает (n_objects, n_features + 1), последний столбец = expected_value (base, raw)
-shap_vals = model.get_feature_importance(
-    Pool(x1, cat_features=cat_features),
-    type="ShapValues"
+# =========================
+# 1) Получаем SHAP от CatBoost (RAW / log-odds)
+# =========================
+pool1 = Pool(x1, cat_features=cat_features)
+
+# shap_vals: (n_objects, n_features + 1), последний столбец = base_value (raw)
+shap_vals = model.get_feature_importance(pool1, type="ShapValues")
+
+phi = shap_vals[0, :-1].astype(float)  # SHAP values по фичам (raw/log-odds)
+base = float(shap_vals[0, -1])         # base_value (raw/log-odds)
+
+feat_names = x1.columns.tolist()
+data_values = x1.iloc[0].values        # значения фичей для подписей на графике
+
+# =========================
+# 2) Собираем shap.Explanation
+# =========================
+explanation = shap.Explanation(
+    values=phi,
+    base_values=base,
+    data=data_values,
+    feature_names=feat_names
 )
-phi = shap_vals[0, :-1]   # SHAP по фичам (raw)
-base = shap_vals[0, -1]   # base value (raw)
 
-feat_names = x1.columns.to_list()
-
-# --- порядок фичей в waterfall: по убыванию |SHAP| ---
-order = np.argsort(-np.abs(phi))
-phi_ord = phi[order]
-names_ord = [feat_names[j] for j in order]
-
-top_k = 20
-phi_k = phi_ord[:top_k]
-names_k = names_ord[:top_k]
-
-# --- проверка: итоговая вероятность из raw ---
+# =========================
+# 3) Проверки согласованности
+# =========================
 raw_final = base + phi.sum()
 pd_from_shap = float(expit(raw_final))
+
+# Важно: predict_proba у CatBoost обычно уже в вероятностях.
+# Если у тебя дальше используется калибратор (cal), то сравнивай отдельно с cal.predict_proba
 pd_model = float(model.predict_proba(x1)[:, 1])
 
-print("PD model:", pd_model)
-print("PD from SHAP (raw -> sigmoid):", pd_from_shap)
+print("=== CONSISTENCY CHECK ===")
+print("raw base:", base)
+print("raw final (base + sum(phi)):", raw_final)
+print("PD from SHAP (sigmoid(raw_final)):", pd_from_shap)
+print("PD from model.predict_proba:", pd_model)
 
-# --- waterfall в RAW (log-odds) со знаками (+ красный, - синий) ---
-# Начальные точки (left) для каждого бара: base + сумма предыдущих вкладов
-raw_left = base + np.r_[0.0, np.cumsum(phi_k[:-1])]
-raw_width = phi_k
+# =========================
+# 4) Waterfall (как в shap.plots.waterfall)
+# =========================
+max_display = 15  # сколько фичей показывать, остальное уйдет в "other features"
 
-# Цвета по знаку SHAP
-colors = np.where(raw_width >= 0, "crimson", "steelblue")
-
-# Для красивого водопада: бар рисуем от min(left, left+width), ширина = abs(width)
-raw_start = np.minimum(raw_left, raw_left + raw_width)
-raw_w = np.abs(raw_width)
-
-# Для отображения сверху вниз (как в классических waterfall)
-y = np.arange(top_k)[::-1]
-
-plt.figure(figsize=(11, 7))
-plt.barh(y, raw_w[::-1], left=raw_start[::-1], color=colors[::-1])
-plt.yticks(y, names_k[::-1])
-plt.xlabel("Δ raw (log-odds)")
-plt.axvline(base, linestyle="--", linewidth=1)  # base line
-plt.axvline(raw_final, linestyle=":", linewidth=1)  # final raw line
+plt.figure(figsize=(10, 10))
+shap.plots.waterfall(explanation, max_display=max_display, show=False)
 
 plt.title(
-    f"Waterfall (RAW / log-odds, top {top_k})\n"
-    f"base PD={expit(base):.4f} → final PD={expit(raw_final):.4f}"
+    "Waterfall (RAW / log-odds)\n"
+    f"base raw={base:.4f} (PD={expit(base):.4f}) → "
+    f"final raw={raw_final:.4f} (PD={pd_from_shap:.4f})",
+    fontsize=12
 )
 plt.tight_layout()
 plt.show()
 
-# --- 'прочие' фичи одним блоком (raw и в PD) ---
-other_raw = phi_ord[top_k:].sum()
-other_pd = expit(raw_final) - expit(base + phi_k.sum())  # вклад остальных в PD (нелинеен, просто справочно)
-
-print(f"Other features total Δraw: {other_raw:+.6f}")
-print(f"Other features net ΔPD (reference): {other_pd:+.6f}")
+# =========================
+# 5) Если у тебя есть калиброванная модель cal (CalibratedClassifierCV),
+#    то waterfall все равно строится по raw-скорингу БАЗОВОЙ модели,
+#    а калиброванный PD можно просто вывести рядом:
+# =========================
+try:
+    pd_cal = float(cal.predict_proba(x1)[:, 1])  # если cal существует
+    print("\nPD from calibrated model (cal.predict_proba):", pd_cal)
+except NameError:
+    pass
