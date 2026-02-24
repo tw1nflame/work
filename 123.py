@@ -1,20 +1,10 @@
-import pandas as pd
+# если year в индексе:
+tmp = final_df.assign(year=final_df.index.get_level_values('year'))
 
-df = pd.read_csv('trading_df.csv')
-df = df.drop(columns=['cred_limit', 'fin_cond_index', 'tax_regime'], errors='ignore')
-df = df.sort_values(['vat_num', 'year']).copy()
+# количество 0/1 и % target=1 по годам
+res = tmp.groupby('year')['target'].agg(total='size', ones='sum')
+res['zeros'] = res['total'] - res['ones']
+res['target_1_pct'] = (res['ones'] / res['total'] * 100).round(2)
+res['target_0_pct'] = (res['zeros'] / res['total'] * 100).round(2)
 
-base_cols = ['year', 'vat_num', 'dflt_year']
-fin_cols = [c for c in df.columns if c not in base_cols]
-
-# 1) сначала режем после первого дефолта
-df['ever_defaulted'] = df.groupby('vat_num')['dflt_year'].cumsum()
-df = df[df['ever_defaulted'] <= 1].copy()
-df = df.drop(columns=['ever_defaulted'])
-
-# 2) потом удаляем строки без отчетности
-all_zero_mask = df[fin_cols].isin([0, '0']).all(axis=1)
-df = df[~all_zero_mask].copy()
-
-print(len(df))
-print(df['dflt_year'].value_counts())
+print(res[['zeros', 'ones', 'target_0_pct', 'target_1_pct']])
