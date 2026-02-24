@@ -1,65 +1,49 @@
 import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
-from scipy.special import expit  # sigmoid
+from scipy.special import expit
+from catboost import Pool
 
-# возьмем любой объект из test (первый)
+# any test object
 i = 0
-x1 = X_test.iloc[[i]]  # DataFrame 1xN
+x1 = X_test.iloc[[i]]
 
-# SHAP для CatBoost:
-# shap_vals: shape (1, n_features) для бинарной классификации
-# expected_value: base value (в raw/логит шкале)
-shap_vals = model.get_feature_importance(Pool(x1, cat_features=cat_features), type="ShapValues")
-# CatBoost возвращает (n_objects, n_features + 1), последний столбец = expected_value (base)
-phi = shap_vals[0, :-1]
-base = shap_vals[0, -1]
+# SHAP from CatBoost: (n_features + 1), last column is base (raw/logit)
+shap = model.get_feature_importance(Pool(x1, cat_features=cat_features), type="ShapValues")[0]
+phi, base = shap[:-1], shap[-1]
 
-# --- порядок фичей в waterfall: по убыванию |SHAP| ---
-feat_names = x1.columns.to_list()
+# order by |SHAP| (in raw space)
+names = x1.columns.to_numpy()
 order = np.argsort(-np.abs(phi))
-phi_ord = phi[order]
-names_ord = [feat_names[j] for j in order]
 
-# --- строим "пошаговую" PD траекторию ---
-raw_steps = np.r_[base, base + np.cumsum(phi_ord)]
-pd_steps = expit(raw_steps)                     # PD после каждого шага
-pd_delta = np.diff(pd_steps)                    # вклад фичи уже в PD-шкале
+top_k = 20
+idx = order[:top_k]
+phi_k = phi[idx]
+names_k = names[idx]
 
-# --- итоговая проверка (должно совпасть с predict_proba) ---
-pd_model = float(model.predict_proba(x1)[:, 1])
-pd_from_shap = float(pd_steps[-1])
-print("PD model:", pd_model)
-print("PD from SHAP path:", pd_from_shap)
+# PD path and per-feature ΔPD (same order)
+raw_steps = np.r_[base, base + np.cumsum(phi_k)]
+pd_steps = expit(raw_steps)
+d_pd = np.diff(pd_steps)
 
-# --- рисуем waterfall в PD ---
-top_k = 20  # если фичей много, покажем топ-20
-pd_delta_k = pd_delta[:top_k]
-names_k = names_ord[:top_k]
+start_pd, end_pd = pd_steps[0], pd_steps[-1]
+print("PD model:", float(model.predict_proba(x1)[:, 1]))
+print("PD from SHAP path (top_k only):", float(end_pd))
 
-start_pd = pd_steps[0]
-end_pd = pd_steps[-1]
-
-# позиции для накопления
-cum = start_pd
-lefts = []
-widths = []
-for d in pd_delta_k:
-    lefts.append(min(cum, cum + d))
-    widths.append(abs(d))
-    cum += d
-
+# waterfall geometry
+left = pd_steps[:-1]
 y = np.arange(len(names_k))[::-1]
 
+colors = np.where(d_pd >= 0, "red", "blue")
 plt.figure(figsize=(10, 6))
-plt.barh(y, widths[::-1], left=np.array(lefts)[::-1])
+plt.barh(y, np.abs(d_pd)[::-1], left=np.minimum(left, left + d_pd)[::-1], color=colors[::-1])
 plt.yticks(y, names_k[::-1])
 plt.xlabel("Δ PD")
-plt.title(f"Waterfall in PD space (top {top_k} features)\nstart PD={start_pd:.4f} → end PD={end_pd:.4f}")
+plt.title(f"Waterfall in PD space (top {top_k})\nstart PD={start_pd:.4f} → end PD={end_pd:.4f}")
 plt.axvline(0, linewidth=1)
 plt.tight_layout()
 plt.show()
 
-# если хочешь вывести еще "прочие" (все кроме top_k) одним блоком:
-other = pd_delta[top_k:].sum()
+# remaining features collapsed
+phi_rest = phi[order[top_k:]]
+other = expit(base + phi_k.sum() + phi_rest.sum()) - expit(base + phi_k.sum())
 print(f"Other features total ΔPD: {other:+.6f}")
