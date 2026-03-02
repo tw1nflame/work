@@ -1,31 +1,37 @@
--- подключиться к базе nwc (если выполняете из psql)
-\c nwc
+Загружает и подготавливает датасет, возвращает DataFrame с MultiIndex (id, year)
+    и колонкой target.
 
--- 1. создать роль (пользователя) без прав на создание объектов
-CREATE ROLE nwc_reader
-LOGIN
-PASSWORD 'STRONG_PASSWORD_HERE'
-NOSUPERUSER
-NOCREATEDB
-NOCREATEROLE
-NOINHERIT;
+    Параметры
+    ---------
+    df_path : str
+        Путь к файлу (.csv или .xlsx).
 
--- 2. разрешить подключение к базе
-GRANT CONNECT ON DATABASE nwc TO nwc_reader;
+    exclude_cols : iterable[str]
+        Список колонок, которые нужно удалить (служебные поля).
 
--- 3. доступ к схеме
-GRANT USAGE ON SCHEMA public TO nwc_reader;
+    year_col : str
+        Название колонки с годом (для сортировки и индекса).
 
--- 4. доступ только на чтение ко всем существующим таблицам
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO nwc_reader;
+    id_col : str
+        Название идентификатора компании.
 
--- 5. доступ к последовательностям (если есть serial / identity)
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO nwc_reader;
+    dflt_col : str
+        Колонка с флагом дефолта → станет target.
 
--- 6. права по умолчанию для будущих таблиц
-ALTER DEFAULT PRIVILEGES IN SCHEMA public
-GRANT SELECT ON TABLES TO nwc_reader;
+    drop_fin_zeroes : bool
+        Удалять строки, где все фин. признаки равны 0.
 
--- 7. права по умолчанию для будущих последовательностей
-ALTER DEFAULT PRIVILEGES IN SCHEMA public
-GRANT USAGE, SELECT ON SEQUENCES TO nwc_reader;
+    drop_ones_after_ones : bool
+        Обрезать историю после первого дефолта по компании.
+
+    keep_first_default_row : bool
+        Оставлять строку с первым дефолтом (если False — удаляется).
+
+    verbose : bool
+        Печатать размер датасета и распределение таргета.
+
+    Возвращает
+    ----------
+    pd.DataFrame
+        Датасет с индексом (id_col, year_col) и колонкой target.
+    """
