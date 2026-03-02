@@ -1,98 +1,97 @@
-from catboost import CatBoostClassifier, Pool
-from sklearn.metrics import roc_auc_score, brier_score_loss, log_loss
+from pathlib import Path
+from datetime import datetime
+import json
+import pandas as pd
 
-def data_split(
-    df,
-    year_col="year",
-    train_year_max=2022,
-    val_year=2023,
-    test_year=2024,
-    target_col="target",
+def save_exp(
+    X_train, y_train, X_val, y_val, X_test, y_test,
+    model,
+    metrics: dict,
+    fi_df: pd.DataFrame,
+    calibrated_model=None,
+    exp_root="exp",
+    name=None,
+    save_data=True,
+    save_models=True,
+    save_fi=True,
+    save_meta=True,
 ):
     """
-    df: DataFrame с MultiIndex, где один из уровней индекса = year_col
-    year_col: имя уровня индекса с годом
-    train_year_max: обучаем на годах <= этому
-    val_year: год для валидации
-    test_year: год для теста (обычно последний)
-    target_col: имя целевой колонки (0/1)
+    Сохраняет эксперимент в папку exp/<timestamp>_<name>/.
+
+    Параметры:
+      X_train, y_train, X_val, y_val, X_test, y_test: сплиты
+      model: базовая модель (CatBoost)
+      metrics: словарь метрик (например, {"auc":..., "brier":..., "logloss":...})
+      fi_df: DataFrame важности фич (например, columns: ["feature","importance"])
+      calibrated_model: калиброванная модель (опционально)
+      exp_root: корневая папка для экспериментов
+      name: суффикс имени эксперимента (опционально)
+      save_data/save_models/save_fi/save_meta: что сохранять
     """
-    X = df.drop(columns=[target_col], errors="ignore")
-    y = df[target_col].astype(int)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    exp_dir = Path(exp_root) / (f"{ts}_{name}" if name else ts)
+    exp_dir.mkdir(parents=True, exist_ok=True)
 
-    years = df.index.get_level_values(year_col)
+    # 1) DATA
+    if save_data:
+        data_dir = exp_dir / "data"
+        data_dir.mkdir(exist_ok=True)
 
-    X_train, y_train = X[years <= train_year_max], y[years <= train_year_max]
-    X_val, y_val     = X[years == val_year],       y[years == val_year]
-    X_test, y_test   = X[years >= test_year],      y[years >= test_year]
+        def _save_split(X, y, split_name):
+            df = X.copy()
+            df["target"] = y.astype(int).values
+            df.to_parquet(data_dir / f"{split_name}.parquet", index=True)
 
-    return X_train, y_train, X_val, y_val, X_test, y_test
+        _save_split(X_train, y_train, "train")
+        _save_split(X_val,   y_val,   "val")
+        _save_split(X_test,  y_test,  "test")
 
+    # 2) MODELS
+    if save_models:
+        model_dir = exp_dir / "models"
+        model_dir.mkdir(exist_ok=True)
 
-def train_catboost(
-    X_train,
-    y_train,
-    X_val,
-    y_val,
-    iterations_num=10_000,
-    eval_metric="AUC",
-    learning_rate=0.01,
-    random_seed=42,
-    verbose=200,
-    early_stopping_rounds=200,
-    class_weights=None,  # можно "Balanced"
-):
-    """
-    X_train, y_train: train-выборка
-    X_val, y_val: val-выборка для early stopping
-    iterations_num: максимум итераций
-    eval_metric: метрика CatBoost (например 'AUC' или 'Logloss')
-    learning_rate: шаг обучения
-    random_seed: сид
-    verbose: частота логов
-    early_stopping_rounds: patience для early stopping
-    class_weights: None или 'Balanced'
-    """
-    if len(X_val) == 0:
-        raise ValueError("Validation split is empty (check val_year).")
+        # CatBoost умеет save_model
+        model.save_model(str(model_dir / "model.cbm"))
+        if calibrated_model is not None:
+            # CalibratedClassifierCV обычно sklearn-объект → через joblib
+            import joblib
+            joblib.dump(calibrated_model, model_dir / "calibrated_model.joblib")
 
-    # зафиксируем набор фичей по train и подгоним val под него
-    X_val = X_val.reindex(columns=X_train.columns)
-
-    cat_features = list(X_train.select_dtypes(include=["object"]).columns)
-
-    train_pool = Pool(X_train, y_train, cat_features=cat_features)
-    val_pool   = Pool(X_val, y_val, cat_features=cat_features)
-
-    model = CatBoostClassifier(
-        iterations=iterations_num,
-        learning_rate=learning_rate,
-        eval_metric=eval_metric,
-        random_seed=random_seed,
-        verbose=verbose,
-        early_stopping_rounds=early_stopping_rounds,
-        class_weights=class_weights,
-        allow_writing_files=False,
+    # 3) METRICS
+    (exp_dir / "metrics.json").write_text(
+        json.dumps(metrics, ensure_ascii=False, indent=2),
+        encoding="utf-8"
     )
 
-    model.fit(train_pool, eval_set=val_pool, use_best_model=True)
-    return model
+    # 4) FEATURE IMPORTANCE
+    if save_fi and fi_df is not None:
+        fi_df.to_csv(exp_dir / "feature_importance.csv", index=False)
 
+    # 5) META (параметры обучения/модели)
+    if save_meta:
+        meta = {}
+        try:
+            meta["catboost_params"] = model.get_params()
+        except Exception:
+            meta["catboost_params"] = None
+        try:
+            meta["catboost_all_params"] = model.get_all_params()
+        except Exception:
+            meta["catboost_all_params"] = None
+        try:
+            meta["best_iteration"] = int(model.get_best_iteration())
+        except Exception:
+            meta["best_iteration"] = None
+        try:
+            meta["best_score"] = model.get_best_score()
+        except Exception:
+            meta["best_score"] = None
 
-def calculate_metrics(model, X_test, y_test):
-    """
-    model: обученная модель с predict_proba
-    X_test, y_test: тестовые данные
-    """
-    p = model.predict_proba(X_test)[:, 1]
+        (exp_dir / "meta.json").write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8"
+        )
 
-    metrics = {
-        "auc": roc_auc_score(y_test, p),
-        "brier": brier_score_loss(y_test, p),
-        "logloss": log_loss(y_test, p),
-    }
-
-    print("AUC:", metrics["auc"])
-    print("Brier:", metrics["brier"])
-    print("LogLoss:", metrics["logloss"])
-    return metrics
+    return str(exp_dir)
