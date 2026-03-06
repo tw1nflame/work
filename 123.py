@@ -1,74 +1,49 @@
-import numpy as np
-from sklearn.base import BaseEstimator, ClassifierMixin
-from sklearn.linear_model import LogisticRegression
+import pandas as pd
 
+codes = [101, 102, 103]
 
-class LogitRecalibrator(BaseEstimator, ClassifierMixin):
-    """
-    Калибровка вероятностей через logistic recalibration:
-        logit(p_cal) = a + b * logit(p_base)
+month_map = {
+    'Январь': 1, 'Февраль': 2, 'Март': 3, 'Апрель': 4,
+    'Май': 5, 'Июнь': 6, 'Июль': 7, 'Август': 8,
+    'Сентябрь': 9, 'Октябрь': 10, 'Ноябрь': 11, 'Декабрь': 12
+}
 
-    Где:
-    - p_base = predict_proba базовой модели
-    - a = intercept correction
-    - b = slope correction
+df = pd.read_excel(
+    'прогноз для февраля.xlsx',
+    sheet_name='ПАО ГМК',
+    skiprows=9,
+    header=[0, 1]
+)
 
-    Подходит, когда модель хорошо ранжирует, но занижает/завышает вероятности.
-    """
+df.columns = [
+    b if 'Unnamed' in str(a) else f'{b} {a}'
+    for a, b in df.columns
+]
 
-    def __init__(self, base_model, eps=1e-15, C=1e6, max_iter=1000):
-        self.base_model = base_model
-        self.eps = eps
-        self.C = C
-        self.max_iter = max_iter
-        self.lr_ = None
+result = (
+    df.loc[:, ~df.columns.str.contains('НИТ|квартал', case=False, na=False)]
+      .loc[lambda x: x['Код'].isin(codes)]
+      .melt(
+          id_vars=['Наименование показателя', 'Код'],
+          var_name='Период',
+          value_name='Значение'
+      )
+      .assign(
+          Год=lambda x: x['Период'].str.extract(r'(\d{4})').astype(int),
+          Месяц=lambda x: x['Период'].str.extract(r'(Январь|Февраль|Март|Апрель|Май|Июнь|Июль|Август|Сентябрь|Октябрь|Ноябрь|Декабрь)')[0],
+          Дата=lambda x: pd.to_datetime({
+              'year': x['Год'],
+              'month': x['Месяц'].map(month_map),
+              'day': 1
+          }) + pd.offsets.MonthEnd(0)
+      )
+      .pivot_table(
+          index='Дата',
+          columns='Наименование показателя',
+          values='Значение',
+          aggfunc='first'
+      )
+      .reset_index()
+)
 
-    def _clip_proba(self, p):
-        return np.clip(p, self.eps, 1 - self.eps)
-
-    def _logit(self, p):
-        p = self._clip_proba(p)
-        return np.log(p / (1 - p))
-
-    def fit(self, X, y):
-        # вероятности базовой модели для класса 1
-        p_base = self.base_model.predict_proba(X)[:, 1]
-
-        # переводим в logit-space
-        z = self._logit(p_base).reshape(-1, 1)
-
-        # почти без регуляризации, чтобы не мешать калибровке
-        self.lr_ = LogisticRegression(
-            C=self.C,
-            solver="lbfgs",
-            max_iter=self.max_iter
-        )
-        self.lr_.fit(z, y)
-        return self
-
-    def predict_proba(self, X):
-        if self.lr_ is None:
-            raise ValueError("Recalibrator is not fitted yet.")
-
-        p_base = self.base_model.predict_proba(X)[:, 1]
-        z = self._logit(p_base).reshape(-1, 1)
-
-        p_cal = self.lr_.predict_proba(z)[:, 1]
-        p_cal = self._clip_proba(p_cal)
-
-        return np.column_stack([1 - p_cal, p_cal])
-
-    def predict(self, X):
-        return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
-
-    @property
-    def intercept_(self):
-        if self.lr_ is None:
-            raise ValueError("Recalibrator is not fitted yet.")
-        return self.lr_.intercept_[0]
-
-    @property
-    def slope_(self):
-        if self.lr_ is None:
-            raise ValueError("Recalibrator is not fitted yet.")
-        return self.lr_.coef_[0, 0]
+result.columns.name = None
