@@ -1,5 +1,6 @@
 import pandas as pd
 from typing import Dict, List, Union
+import numpy as np
 
 def add_lagged_covariates(
     df: pd.DataFrame, 
@@ -95,7 +96,7 @@ def _ensure_future_row(df: pd.DataFrame, date_column: str, target_column: Union[
 
 def add_month_feature(df: pd.DataFrame, date_column: str, feature_name: str = 'month', target_column: Union[str, List[str]] = None) -> pd.DataFrame:
     """
-    Добавляет номер месяца в качестве признака (извлекает его из колонки с датой).
+    Добавляет номер месяца в виде двух циклических признаков (sin и cos).
     Также гарантирует наличие строки для следующего прогнозного месяца.
     
     Параметры:
@@ -105,14 +106,14 @@ def add_month_feature(df: pd.DataFrame, date_column: str, feature_name: str = 'm
     date_column : str
         Название колонки с датой.
     feature_name : str
-        Название новой колонки. По умолчанию 'month'.
+        Название новой колонки. По умолчанию 'month'. Сгенерируются {feature_name}_sin и {feature_name}_cos.
     target_column : Union[str, List[str]], optional
         Колонки, по которым проверяется, пустая ли уже строка.
         
     Возвращает:
     ----------
     pd.DataFrame
-        Новый датафрейм с добавленной колонкой месяца.
+        Новый датафрейм с добавленными sin и cos колонками месяца.
     """
     df_res = df.copy()
     
@@ -124,7 +125,9 @@ def add_month_feature(df: pd.DataFrame, date_column: str, feature_name: str = 'm
         
     df_res = _ensure_future_row(df_res, date_column, target_column=target_column)
         
-    df_res[feature_name] = df_res[date_column].dt.month
+    month_vals = df_res[date_column].dt.month
+    df_res[f"{feature_name}_sin"] = np.sin(2 * np.pi * month_vals / 12.0)
+    df_res[f"{feature_name}_cos"] = np.cos(2 * np.pi * month_vals / 12.0)
     
     return df_res
 
