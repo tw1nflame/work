@@ -1,19 +1,4 @@
-import asyncio
-import os
-import asyncpg
+GRANT USAGE, CREATE ON SCHEMA public TO db_user;
 
-
-async def main():
-    conn = await asyncpg.connect(
-        os.environ["DATABASE_URL"],
-        timeout=5,
-        command_timeout=5,
-    )
-
-    value = await conn.fetchval("select 1")
-    print(value)
-
-    await conn.close()
-
-
-asyncio.run(main())
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO db_user;
+GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO db_user;
